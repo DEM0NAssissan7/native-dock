@@ -39,6 +39,9 @@ export default class NativeDockExtension extends Extension {
     this._origParent = null;
     this._origLayoutDash = null;
     this._origItemMenuStateChanged = null;
+    this._origRedisplay = null;
+    this._origWorkId = null;
+    this._customWorkId = null;
     this._showAppsId = null;
     this._focusWindow = null;
     this._pressureBarrier = null;
@@ -77,14 +80,14 @@ export default class NativeDockExtension extends Extension {
     this._dash = dash;
     this._origParent = this._dash.get_parent();
 
-    // 1. Create the dock container box spanning the bottom of the screen
+    // Create the dock container box spanning the bottom of the screen
     this._dockBox = new St.Widget({
       name: "native-dock-box",
       layout_manager: new Clutter.BinLayout(),
       reactive: false,
     });
 
-    // 2. Remove dash from ControlsManager and insert DummyDash in its place so
+    // Remove dash from ControlsManager and insert DummyDash in its place so
     // ControlsManagerLayout reserves the correct native height for overview workspaces.
     if (this._origParent) this._origParent.remove_child(this._dash);
 
@@ -94,19 +97,19 @@ export default class NativeDockExtension extends Extension {
     this._origLayoutDash = controls.layout_manager._dash;
     controls.layout_manager._dash = this._dummyDash;
 
-    // 3. Add dash to our dock box centered horizontally and aligned to bottom
+    // Add dash to our dock box centered horizontally and aligned to bottom
     this._dash.x_align = Clutter.ActorAlign.CENTER;
     this._dash.y_align = Clutter.ActorAlign.END;
     this._dash.reactive = true;
     this._dash.track_hover = true;
     this._dockBox.add_child(this._dash);
 
-    // 4. Add dock box to Chrome (above windows)
+    // Add dock box to Chrome (above windows)
     Main.layoutManager.addTopChrome(this._dockBox, {
       trackFullscreen: true,
     });
 
-    // 5. Intercept context menu state to prevent dock hiding while menu is open
+    // Intercept context menu state to prevent dock hiding while menu is open
     this._origItemMenuStateChanged = this._dash._itemMenuStateChanged?.bind(
       this._dash,
     );
@@ -116,7 +119,18 @@ export default class NativeDockExtension extends Extension {
       if (!opened && !this._isHovered()) this._queueHide();
     };
 
-    // 6. Connect hover signal to manage auto-hiding when revealed
+    // Intercept dash redisplay to enable native icon addition/removal animations on desktop
+    this._origRedisplay = this._dash._redisplay.bind(this._dash);
+    this._dash._redisplay = () => this._redisplay();
+    if (this._dash._workId) {
+      this._origWorkId = this._dash._workId;
+      this._customWorkId = Main.initializeDeferredWork(this._dash._box, () =>
+        this._redisplay(),
+      );
+      this._dash._workId = this._customWorkId;
+    }
+
+    // Connect hover signal to manage auto-hiding when revealed
     this._dash.connectObject(
       "notify::hover",
       () => this._onHoverChanged(),
@@ -128,7 +142,7 @@ export default class NativeDockExtension extends Extension {
       this,
     );
 
-    // 7. Track window focus, maximize, tile, resize, minimize, destroy, and workspace changes
+    // Track window focus, maximize, tile, resize, minimize, destroy, and workspace changes
     global.display.connectObject(
       "notify::focus-window",
       () => this._onFocusWindowChangedDelayed(),
@@ -167,7 +181,7 @@ export default class NativeDockExtension extends Extension {
       this,
     );
 
-    // 8. Synchronize dock animation with native overview transitions & gestures
+    // Synchronize dock animation with native overview transitions & gestures
     if (controls._stateAdjustment) {
       controls._stateAdjustment.connectObject(
         "notify::value",
@@ -227,7 +241,7 @@ export default class NativeDockExtension extends Extension {
       this,
     );
 
-    // 9. Connect Show Applications button to open App Grid when clicked on desktop
+    // Connect Show Applications button to open App Grid when clicked on desktop
     this._showAppsId = this._dash.showAppsButton.connect(
       "notify::checked",
       () => {
@@ -659,6 +673,37 @@ export default class NativeDockExtension extends Extension {
     });
   }
 
+  _isDockVisibleOnDesktop() {
+    if (!this._dockBox || !this._dash) return false;
+    if (this._revealed || this._isHovered() || this._menuOpen) return true;
+    if (this._dockTargetHidden) return false;
+    if (this._shouldHideForFocusedWindow()) return false;
+    return this._dockBox.translation_y === 0 && this._dockBox.opacity > 0;
+  }
+
+  _redisplay() {
+    if (!this._dash || !this._origRedisplay) return;
+
+    const shouldAnimate =
+      !Main.overview.visible &&
+      !Main.overview.animationInProgress &&
+      this._isDockVisibleOnDesktop();
+
+    if (shouldAnimate) {
+      Object.defineProperty(Main.overview, "visible", {
+        get: () => true,
+        configurable: true,
+      });
+      try {
+        this._origRedisplay();
+      } finally {
+        delete Main.overview.visible;
+      }
+    } else {
+      this._origRedisplay();
+    }
+  }
+
   disable() {
     Main.layoutManager.disconnectObject(this);
     global.display.disconnectObject(this);
@@ -713,6 +758,17 @@ export default class NativeDockExtension extends Extension {
         this._dash._itemMenuStateChanged = this._origItemMenuStateChanged;
         this._origItemMenuStateChanged = null;
       }
+
+      if (this._origRedisplay) {
+        this._dash._redisplay = this._origRedisplay;
+        this._origRedisplay = null;
+      }
+
+      if (this._origWorkId) {
+        this._dash._workId = this._origWorkId;
+        this._origWorkId = null;
+      }
+      this._customWorkId = null;
     }
 
     // Restore layout manager's dash reference and remove dummy actor
