@@ -7,6 +7,7 @@ import GObject from "gi://GObject";
 import Meta from "gi://Meta";
 import Shell from "gi://Shell";
 import St from "gi://St";
+import { DashItemContainer } from "resource:///org/gnome/shell/ui/dash.js";
 
 const DummyDash = GObject.registerClass(
   class DummyDash extends Clutter.Actor {
@@ -37,11 +38,14 @@ export default class NativeDockExtension extends Extension {
     this._dockBox = null;
     this._dummyDash = null;
     this._origParent = null;
+    this._origDashIndex = -1;
+    this._origDashXAlign = null;
+    this._origDashYAlign = null;
+    this._origDashTrackHover = null;
+    this._origDashReactive = null;
     this._origLayoutDash = null;
     this._origItemMenuStateChanged = null;
-    this._origRedisplay = null;
-    this._origWorkId = null;
-    this._customWorkId = null;
+    this._origDashItemContainerShow = null;
     this._showAppsId = null;
     this._focusWindow = null;
     this._pressureBarrier = null;
@@ -79,6 +83,14 @@ export default class NativeDockExtension extends Extension {
 
     this._dash = dash;
     this._origParent = this._dash.get_parent();
+    this._origDashIndex = this._origParent
+      ? this._origParent.get_children().indexOf(this._dash)
+      : -1;
+
+    this._origDashXAlign = this._dash.x_align;
+    this._origDashYAlign = this._dash.y_align;
+    this._origDashTrackHover = this._dash.track_hover;
+    this._origDashReactive = this._dash.reactive;
 
     // Create the dock container box spanning the bottom of the screen
     this._dockBox = new St.Widget({
@@ -87,12 +99,20 @@ export default class NativeDockExtension extends Extension {
       reactive: false,
     });
 
-    // Remove dash from ControlsManager and insert DummyDash in its place so
+    // Remove dash from ControlsManager and insert DummyDash in its exact place so
     // ControlsManagerLayout reserves the correct native height for overview workspaces.
-    if (this._origParent) this._origParent.remove_child(this._dash);
-
-    this._dummyDash = new DummyDash(this._dash);
-    controls.add_child(this._dummyDash);
+    if (this._origParent) {
+      this._origParent.remove_child(this._dash);
+      this._dummyDash = new DummyDash(this._dash);
+      if (this._origDashIndex >= 0) {
+        this._origParent.insert_child_at_index(
+          this._dummyDash,
+          this._origDashIndex,
+        );
+      } else {
+        this._origParent.add_child(this._dummyDash);
+      }
+    }
 
     this._origLayoutDash = controls.layout_manager._dash;
     controls.layout_manager._dash = this._dummyDash;
@@ -110,25 +130,42 @@ export default class NativeDockExtension extends Extension {
     });
 
     // Intercept context menu state to prevent dock hiding while menu is open
-    this._origItemMenuStateChanged = this._dash._itemMenuStateChanged?.bind(
-      this._dash,
-    );
+    this._origItemMenuStateChanged = this._dash._itemMenuStateChanged;
     this._dash._itemMenuStateChanged = (item, opened) => {
-      this._origItemMenuStateChanged?.(item, opened);
+      this._origItemMenuStateChanged?.call(this._dash, item, opened);
       this._menuOpen = opened;
       if (!opened && !this._isHovered()) this._queueHide();
     };
 
-    // Intercept dash redisplay to enable native icon addition/removal animations on desktop
-    this._origRedisplay = this._dash._redisplay.bind(this._dash);
-    this._dash._redisplay = () => this._redisplay();
-    if (this._dash._workId) {
-      this._origWorkId = this._dash._workId;
-      this._customWorkId = Main.initializeDeferredWork(this._dash._box, () =>
-        this._redisplay(),
-      );
-      this._dash._workId = this._customWorkId;
-    }
+    // Hook DashItemContainer to enable native icon addition/removal animations on desktop
+    this._origDashItemContainerShow = DashItemContainer.prototype.show;
+    const extension = this;
+
+    DashItemContainer.prototype.show = function (animate) {
+      if (
+        !animate &&
+        !Main.overview.visible &&
+        extension._isDockVisibleOnDesktop() &&
+        this.get_parent() === extension._dash?._box
+      ) {
+        animate = true;
+      }
+      extension._origDashItemContainerShow.call(this, animate);
+    };
+
+    DashItemContainer.prototype.destroy = function () {
+      if (
+        !this.animatingOut &&
+        !Main.overview.visible &&
+        extension._isDockVisibleOnDesktop() &&
+        this.get_parent() === extension._dash?._box &&
+        this.child != null
+      ) {
+        this.animateOutAndDestroy();
+        return;
+      }
+      Clutter.Actor.prototype.destroy.call(this);
+    };
 
     // Connect hover signal to manage auto-hiding when revealed
     this._dash.connectObject(
@@ -640,6 +677,7 @@ export default class NativeDockExtension extends Extension {
   _showDock() {
     if (
       !this._dockBox ||
+      !this._dash ||
       Main.overview.visible ||
       Main.overview._animationInProgress
     )
@@ -657,6 +695,7 @@ export default class NativeDockExtension extends Extension {
   _hideDock() {
     if (
       !this._dockBox ||
+      !this._dash ||
       Main.overview.visible ||
       Main.overview._animationInProgress
     )
@@ -679,29 +718,6 @@ export default class NativeDockExtension extends Extension {
     if (this._dockTargetHidden) return false;
     if (this._shouldHideForFocusedWindow()) return false;
     return this._dockBox.translation_y === 0 && this._dockBox.opacity > 0;
-  }
-
-  _redisplay() {
-    if (!this._dash || !this._origRedisplay) return;
-
-    const shouldAnimate =
-      !Main.overview.visible &&
-      !Main.overview.animationInProgress &&
-      this._isDockVisibleOnDesktop();
-
-    if (shouldAnimate) {
-      Object.defineProperty(Main.overview, "visible", {
-        get: () => true,
-        configurable: true,
-      });
-      try {
-        this._origRedisplay();
-      } finally {
-        delete Main.overview.visible;
-      }
-    } else {
-      this._origRedisplay();
-    }
   }
 
   disable() {
@@ -746,32 +762,14 @@ export default class NativeDockExtension extends Extension {
 
     this._destroyBarrier();
 
-    if (this._dash) {
-      this._dash.disconnectObject(this);
-
-      if (this._showAppsId) {
-        this._dash.showAppsButton.disconnect(this._showAppsId);
-        this._showAppsId = null;
-      }
-
-      if (this._origItemMenuStateChanged) {
-        this._dash._itemMenuStateChanged = this._origItemMenuStateChanged;
-        this._origItemMenuStateChanged = null;
-      }
-
-      if (this._origRedisplay) {
-        this._dash._redisplay = this._origRedisplay;
-        this._origRedisplay = null;
-      }
-
-      if (this._origWorkId) {
-        this._dash._workId = this._origWorkId;
-        this._origWorkId = null;
-      }
-      this._customWorkId = null;
+    // 1. Restore DashItemContainer prototype methods
+    if (this._origDashItemContainerShow) {
+      DashItemContainer.prototype.show = this._origDashItemContainerShow;
+      this._origDashItemContainerShow = null;
     }
+    delete DashItemContainer.prototype.destroy;
 
-    // Restore layout manager's dash reference and remove dummy actor
+    // 2. Remove DummyDash and restore layout manager's dash reference
     if (controls && this._dummyDash) {
       if (this._origLayoutDash) {
         controls.layout_manager._dash = this._origLayoutDash;
@@ -783,17 +781,67 @@ export default class NativeDockExtension extends Extension {
       this._dummyDash = null;
     }
 
-    // Restore real dash back to ControlsManager
+    // 3. Restore real dash back to ControlsManager at its exact original index & properties
     if (this._dash) {
+      this._dash.disconnectObject(this);
+
+      if (this._showAppsId) {
+        this._dash.showAppsButton.disconnect(this._showAppsId);
+        this._showAppsId = null;
+      }
+
+      delete this._dash._itemMenuStateChanged;
+      this._origItemMenuStateChanged = null;
+
+      if (!Main.overview.visible && this._dash.showAppsButton?.checked)
+        this._dash.showAppsButton.checked = false;
+
       if (this._dash.get_parent() === this._dockBox)
         this._dockBox.remove_child(this._dash);
-      if (this._origParent) this._origParent.add_child(this._dash);
+
+      this._dash.remove_all_transitions();
+      this._dash.x_align = this._origDashXAlign ?? Clutter.ActorAlign.FILL;
+      this._dash.y_align = this._origDashYAlign ?? Clutter.ActorAlign.FILL;
+      this._dash.track_hover = this._origDashTrackHover ?? false;
+      this._dash.reactive = this._origDashReactive ?? true;
+      this._dash.translation_x = 0;
+      this._dash.translation_y = 0;
+      this._dash.scale_x = 1;
+      this._dash.scale_y = 1;
+      this._dash.opacity = 255;
+
+      if (this._origParent) {
+        if (
+          this._origDashIndex >= 0 &&
+          this._origDashIndex <= this._origParent.get_n_children()
+        ) {
+          this._origParent.insert_child_at_index(
+            this._dash,
+            this._origDashIndex,
+          );
+        } else {
+          this._origParent.add_child(this._dash);
+        }
+      }
+
+      this._dash.queue_relayout();
       this._dash = null;
       this._origParent = null;
+      this._origDashIndex = -1;
+      this._origDashXAlign = null;
+      this._origDashYAlign = null;
+      this._origDashTrackHover = null;
+      this._origDashReactive = null;
     }
 
-    // Remove dock box from Chrome
+    if (controls) {
+      controls.layout_manager?.layout_changed();
+      controls.queue_relayout();
+    }
+
+    // 4. Remove dock box from Chrome
     if (this._dockBox) {
+      this._dockBox.remove_all_transitions();
       Main.layoutManager.removeChrome(this._dockBox);
       this._dockBox.destroy();
       this._dockBox = null;
