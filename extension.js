@@ -301,6 +301,18 @@ export default class NativeDockExtension extends Extension {
         if (window.get_tile_match?.() !== null && window.get_tile_match?.() !== undefined)
             return true;
 
+        // 4. Modal dialogs
+        if (window.get_window_type() === Meta.WindowType.MODAL_DIALOG || window.is_attached_dialog?.())
+            return true;
+
+        // 5. Dialogs or popups transient for a maximized, tiled, or fullscreen window
+        let parent = window.get_transient_for?.();
+        while (parent) {
+            if (parent.is_fullscreen() || parent.maximized_vertically || parent.maximized_horizontally || (parent.get_tile_match?.() !== null && parent.get_tile_match?.() !== undefined))
+                return true;
+            parent = parent.get_transient_for?.();
+        }
+
         return false;
     }
 
