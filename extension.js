@@ -49,6 +49,8 @@ export default class NativeDockExtension extends Extension {
         this._hideTimeoutId = 0;
         this._revealTimeoutId = 0;
         this._idleCheckId = 0;
+        this._stateTimeoutId = 0;
+        this._dockTargetHidden = null;
         this._overviewWasShown = false;
         this._overviewHiding = false;
         this._dockWasHiddenOnOverviewEnter = false;
@@ -213,7 +215,7 @@ export default class NativeDockExtension extends Extension {
         this._dockBox.set_size(monitor.width, dockHeight);
 
         this._initBarrier();
-        this._updateVisibility();
+        this._updateVisibility(true);
     }
 
     _initBarrier() {
@@ -318,7 +320,6 @@ export default class NativeDockExtension extends Extension {
                     'notify::minimized', () => this._onFocusWindowChangedDelayed(),
                     'notify::fullscreen', () => this._onFocusWindowChangedDelayed(),
                     'size-changed', () => this._onFocusWindowChangedDelayed(),
-                    'position-changed', () => this._onFocusWindowChangedDelayed(),
                     'unmanaging', () => {
                         this._focusWindow = null;
                         this._onFocusWindowChangedDelayed();
@@ -363,6 +364,10 @@ export default class NativeDockExtension extends Extension {
             GLib.source_remove(this._idleCheckId);
             this._idleCheckId = 0;
         }
+        if (this._stateTimeoutId) {
+            GLib.source_remove(this._stateTimeoutId);
+            this._stateTimeoutId = 0;
+        }
 
         this._overviewWasShown = false;
         this._overviewHiding = false;
@@ -372,10 +377,15 @@ export default class NativeDockExtension extends Extension {
     }
 
     _onOverviewHidden() {
+        if (this._stateTimeoutId) {
+            GLib.source_remove(this._stateTimeoutId);
+            this._stateTimeoutId = 0;
+        }
         this._overviewWasShown = false;
         this._overviewHiding = false;
         this._dockWasHiddenOnOverviewEnter = false;
         this._revealed = false;
+        this._dockTargetHidden = this._shouldHideForFocusedWindow();
         this._onFocusWindowChangedDelayed();
     }
 
@@ -415,6 +425,12 @@ export default class NativeDockExtension extends Extension {
             this._revealTimeoutId = 0;
         }
 
+        if (this._stateTimeoutId) {
+            GLib.source_remove(this._stateTimeoutId);
+            this._stateTimeoutId = 0;
+        }
+
+        this._dockTargetHidden = false;
         this._showDock();
 
         if (!this._isHovered()) {
@@ -453,27 +469,69 @@ export default class NativeDockExtension extends Extension {
         if (this._hideTimeoutId)
             GLib.source_remove(this._hideTimeoutId);
 
+        if (this._stateTimeoutId) {
+            GLib.source_remove(this._stateTimeoutId);
+            this._stateTimeoutId = 0;
+        }
+
         this._hideTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
             this._hideTimeoutId = 0;
             if (this._shouldHideForFocusedWindow() && !this._isHovered() && !this._menuOpen && !Main.overview.visible) {
                 this._revealed = false;
+                this._dockTargetHidden = true;
                 this._hideDock();
             }
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    _updateVisibility() {
+    _updateVisibility(immediate = false) {
         if (Main.overview.visible || Main.overview._animationInProgress)
             return;
 
-        if (this._shouldHideForFocusedWindow()) {
-            if (!this._revealed && !this._isHovered() && !this._menuOpen)
-                this._hideDock();
-        } else {
-            this._revealed = false;
-            this._showDock();
+        const shouldHide = this._shouldHideForFocusedWindow();
+
+        // If dock was revealed via pressure or is hovered/menuOpen:
+        if (shouldHide && (this._revealed || this._isHovered() || this._menuOpen))
+            return;
+
+        if (this._stateTimeoutId) {
+            GLib.source_remove(this._stateTimeoutId);
+            this._stateTimeoutId = 0;
         }
+
+        if (this._dockTargetHidden === shouldHide && !this._revealed)
+            return;
+
+        if (immediate) {
+            this._dockTargetHidden = shouldHide;
+            if (shouldHide)
+                this._hideDock();
+            else
+                this._showDock();
+            return;
+        }
+
+        // 400ms delay/debounce before changing state
+        this._stateTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 400, () => {
+            this._stateTimeoutId = 0;
+
+            if (Main.overview.visible || Main.overview._animationInProgress)
+                return GLib.SOURCE_REMOVE;
+
+            const targetHide = this._shouldHideForFocusedWindow();
+            this._dockTargetHidden = targetHide;
+
+            if (targetHide) {
+                if (!this._revealed && !this._isHovered() && !this._menuOpen)
+                    this._hideDock();
+            } else {
+                this._revealed = false;
+                this._showDock();
+            }
+
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _showDock() {
@@ -535,6 +593,12 @@ export default class NativeDockExtension extends Extension {
             this._idleCheckId = 0;
         }
 
+        if (this._stateTimeoutId) {
+            GLib.source_remove(this._stateTimeoutId);
+            this._stateTimeoutId = 0;
+        }
+
+        this._dockTargetHidden = null;
         this._overviewWasShown = false;
         this._overviewHiding = false;
 
