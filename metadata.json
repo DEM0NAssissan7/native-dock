@@ -2,6 +2,7 @@
     "name": "Native Dock",
     "description": "Makes the native GNOME Shell Dash always visible as a dock",
     "uuid": "native-dock@mawi.ink",
+    "url": "https://github.com/DEM0NAssissan7/native-dock",
     "shell-version": [
         "51"
     ]
