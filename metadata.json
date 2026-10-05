@@ -1,0 +1,8 @@
+{
+    "name": "Native Dock",
+    "description": "Makes the native GNOME Shell Dash always visible as a dock",
+    "uuid": "native-dock@mawi.ink",
+    "shell-version": [
+        "51"
+    ]
+}
