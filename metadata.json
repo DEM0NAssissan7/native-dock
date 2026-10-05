@@ -4,6 +4,7 @@
     "uuid": "native-dock@mawi.ink",
     "url": "https://github.com/DEM0NAssissan7/native-dock",
     "shell-version": [
+        "50",
         "51"
     ]
 }

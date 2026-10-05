@@ -44,7 +44,7 @@ Instead of reconstructing a dock from scratch or bundling third-party widget sta
 
 ## Requirements
 
-- **GNOME Shell**: 45+ (tested and optimized for GNOME 51 on Wayland)
+- **GNOME Shell**: 50, 51 (tested on GNOME 51 on Wayland)
 
 ---
 
