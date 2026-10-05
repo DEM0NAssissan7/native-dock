@@ -595,7 +595,7 @@ export default class NativeDockExtension extends Extension {
     }
 
     // Debounce before changing state
-    this._stateTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+    this._stateTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 120, () => {
       this._stateTimeoutId = 0;
 
       if (Main.overview.visible || Main.overview._animationInProgress)
