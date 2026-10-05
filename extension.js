@@ -42,6 +42,7 @@ export default class NativeDockExtension extends Extension {
     this._showAppsId = null;
     this._focusWindow = null;
     this._pressureBarrier = null;
+    this._pressureBarrierId = null;
     this._barrier = null;
     this._revealed = false;
     this._menuOpen = false;
@@ -270,7 +271,9 @@ export default class NativeDockExtension extends Extension {
       1000,
       Shell.ActionMode.NORMAL,
     );
-    this._pressureBarrier.connect("trigger", () => this._onPressureTrigger());
+    this._pressureBarrierId = this._pressureBarrier.connect("trigger", () =>
+      this._onPressureTrigger(),
+    );
 
     try {
       this._barrier = new Meta.Barrier({
@@ -295,6 +298,10 @@ export default class NativeDockExtension extends Extension {
       this._barrier = null;
     }
     if (this._pressureBarrier) {
+      if (this._pressureBarrierId) {
+        this._pressureBarrier.disconnect(this._pressureBarrierId);
+        this._pressureBarrierId = null;
+      }
       this._pressureBarrier.destroy();
       this._pressureBarrier = null;
     }
