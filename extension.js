@@ -510,7 +510,7 @@ export default class NativeDockExtension extends Extension {
     if (!this._isHovered()) {
       this._revealTimeoutId = GLib.timeout_add(
         GLib.PRIORITY_DEFAULT,
-        1000,
+        800,
         () => {
           this._revealTimeoutId = 0;
           if (!this._isHovered() && !this._menuOpen) {
@@ -555,7 +555,7 @@ export default class NativeDockExtension extends Extension {
       this._stateTimeoutId = 0;
     }
 
-    this._hideTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+    this._hideTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, () => {
       this._hideTimeoutId = 0;
       if (
         this._shouldHideForFocusedWindow() &&
