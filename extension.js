@@ -343,28 +343,28 @@ export default class NativeDockExtension extends Extension {
     const window = this._getFocusedOrTopWindow();
     if (!window) return false;
 
-    // 1. Fullscreen
+    // Fullscreen
     if (window.is_fullscreen()) return true;
 
-    // 2. Maximized (vertically or horizontally)
+    // Maximized (vertically or horizontally)
     if (window.maximized_vertically || window.maximized_horizontally)
       return true;
 
-    // 3. Tiled
+    // Tiled
     if (
       window.get_tile_match?.() !== null &&
       window.get_tile_match?.() !== undefined
     )
       return true;
 
-    // 4. Modal dialogs
+    // Modal dialogs
     if (
       window.get_window_type() === Meta.WindowType.MODAL_DIALOG ||
       window.is_attached_dialog?.()
     )
       return true;
 
-    // 5. Dialogs or popups transient for a maximized, tiled, or fullscreen window
+    // Dialogs or popups transient for a maximized, tiled, or fullscreen window
     let parent = window.get_transient_for?.();
     while (parent) {
       if (
