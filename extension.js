@@ -5,6 +5,7 @@ import Clutter from "gi://Clutter";
 import GLib from "gi://GLib";
 import GObject from "gi://GObject";
 import Meta from "gi://Meta";
+import Mtk from "gi://Mtk";
 import Shell from "gi://Shell";
 import St from "gi://St";
 import { DashItemContainer } from "resource:///org/gnome/shell/ui/dash.js";
@@ -46,6 +47,8 @@ export default class NativeDockExtension extends Extension {
     this._origLayoutDash = null;
     this._origItemMenuStateChanged = null;
     this._origDashItemContainerShow = null;
+    this._origGetWorkArea = null;
+    this._idleWindowIds = new Set();
     this._showAppsId = null;
     this._focusWindow = null;
     this._pressureBarrier = null;
@@ -129,6 +132,13 @@ export default class NativeDockExtension extends Extension {
       trackFullscreen: true,
     });
 
+    this._hookWorkArea();
+    try {
+      global.display.emit("workareas-changed");
+    } catch {
+      // Ignore
+    }
+
     // Intercept context menu state to prevent dock hiding while menu is open
     this._origItemMenuStateChanged = this._dash._itemMenuStateChanged;
     this._dash._itemMenuStateChanged = (item, opened) => {
@@ -190,7 +200,10 @@ export default class NativeDockExtension extends Extension {
       "grab-op-end",
       () => this._onFocusWindowChangedDelayed(),
       "window-created",
-      () => this._onFocusWindowChangedDelayed(),
+      (display, window) => {
+        this._onWindowCreated(window);
+        this._onFocusWindowChangedDelayed();
+      },
       "window-visibility-updated",
       () => this._onFocusWindowChangedDelayed(),
       this,
@@ -223,7 +236,11 @@ export default class NativeDockExtension extends Extension {
       controls._stateAdjustment.connectObject(
         "notify::value",
         () => {
-          if (Main.overview.visible || Main.overview._animationInProgress) {
+          if (
+            Main.overview.visible ||
+            Main.overview._animationInProgress ||
+            controls._stateAdjustment.gestureInProgress
+          ) {
             const progress = Math.clamp(controls._stateAdjustment.value, 0, 1);
             const shouldHide = this._shouldHideForFocusedWindow();
             const isClosing =
@@ -427,6 +444,21 @@ export default class NativeDockExtension extends Extension {
       )
         return true;
       parent = parent.get_transient_for?.();
+    }
+
+    // Window overlapping dock on primary monitor (intellihide)
+    const monitor = Main.layoutManager.primaryMonitor;
+    if (monitor && this._dockBox) {
+      const frame = window.get_frame_rect();
+      const dockHeight = this._dockBox.height > 0 ? this._dockBox.height : 64;
+      const dockTop = monitor.y + monitor.height - dockHeight;
+      if (
+        frame.y + frame.height > dockTop &&
+        frame.x < monitor.x + monitor.width &&
+        frame.x + frame.width > monitor.x
+      ) {
+        return true;
+      }
     }
 
     return false;
@@ -720,7 +752,125 @@ export default class NativeDockExtension extends Extension {
     return this._dockBox.translation_y === 0 && this._dockBox.opacity > 0;
   }
 
+  _hookWorkArea() {
+    if (this._origGetWorkArea) return;
+
+    this._origGetWorkArea = Meta.Workspace.prototype.get_work_area_for_monitor;
+    const extension = this;
+
+    Meta.Workspace.prototype.get_work_area_for_monitor = function (monitorIndex) {
+      const origRect = extension._origGetWorkArea.call(this, monitorIndex);
+      if (!origRect) return origRect;
+
+      const primary = Main.layoutManager.primaryIndex;
+      if (monitorIndex !== primary) return origRect;
+
+      if (!extension._isDockVisibleOnDesktop()) return origRect;
+
+      const controls = Main.overview._overview?._controls;
+      if (
+        Main.overview.visible ||
+        Main.overview._animationInProgress ||
+        controls?._stateAdjustment?.gestureInProgress
+      ) {
+        return origRect;
+      }
+
+      const stack = new Error().stack;
+      if (!stack || !stack.includes("mosaicwm")) return origRect;
+
+      // Ensure Overview components never receive modified work area
+      if (
+        stack.includes("overviewLayout.js") ||
+        stack.includes("ui/workspace.js") ||
+        stack.includes("ui/overviewControls.js") ||
+        stack.includes("ui/layout.js")
+      ) {
+        return origRect;
+      }
+
+      const dockHeight =
+        extension._dockBox?.height > 0 ? extension._dockBox.height : 64;
+
+      return new Mtk.Rectangle({
+        x: origRect.x,
+        y: origRect.y,
+        width: origRect.width,
+        height: Math.max(0, origRect.height - dockHeight),
+      });
+    };
+  }
+
+  _unhookWorkArea() {
+    if (this._origGetWorkArea) {
+      Meta.Workspace.prototype.get_work_area_for_monitor = this._origGetWorkArea;
+      this._origGetWorkArea = null;
+    }
+  }
+
+  _onWindowCreated(window) {
+    if (!window || window.get_window_type() === Meta.WindowType.DESKTOP) return;
+
+    const idleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+      this._idleWindowIds?.delete(idleId);
+      if (!this._dockBox || !this._isDockVisibleOnDesktop())
+        return GLib.SOURCE_REMOVE;
+
+      if (
+        window.is_fullscreen() ||
+        window.maximized_vertically ||
+        window.maximized_horizontally
+      )
+        return GLib.SOURCE_REMOVE;
+
+      const monitor = Main.layoutManager.primaryMonitor;
+      if (!monitor || !window.is_on_primary_monitor())
+        return GLib.SOURCE_REMOVE;
+
+      const frame = window.get_frame_rect();
+      if (!frame || frame.width <= 0 || frame.height <= 0)
+        return GLib.SOURCE_REMOVE;
+
+      const dockHeight =
+        this._dockBox.height > 0 ? this._dockBox.height : 64;
+      const dockTop = monitor.y + monitor.height - dockHeight;
+
+      if (
+        frame.y + frame.height > dockTop &&
+        frame.x < monitor.x + monitor.width &&
+        frame.x + frame.width > monitor.x
+      ) {
+        const overlap = frame.y + frame.height - dockTop;
+        const panelTop = monitor.y + 32;
+        if (frame.y - overlap >= panelTop) {
+          window.move_frame(true, frame.x, frame.y - overlap);
+        } else {
+          this._updateVisibility();
+        }
+      }
+      return GLib.SOURCE_REMOVE;
+    });
+
+    this._idleWindowIds?.add(idleId);
+  }
+
   disable() {
+    this._unhookWorkArea();
+
+    if (this._idleWindowIds) {
+      for (const id of this._idleWindowIds) {
+        GLib.source_remove(id);
+      }
+      this._idleWindowIds.clear();
+      this._idleWindowIds = null;
+    }
+
+    try {
+      global.display.emit("workareas-changed");
+    } catch {
+      // Ignore
+    }
+
     Main.layoutManager.disconnectObject(this);
     global.display.disconnectObject(this);
     global.window_manager.disconnectObject(this);
@@ -845,6 +995,12 @@ export default class NativeDockExtension extends Extension {
       Main.layoutManager.removeChrome(this._dockBox);
       this._dockBox.destroy();
       this._dockBox = null;
+    }
+
+    try {
+      global.display.emit("workareas-changed");
+    } catch {
+      // Ignore
     }
   }
 }
